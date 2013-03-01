@@ -1,0 +1,205 @@
+#include <GL/glfw.h>
+#include <iostream>
+
+using namespace std;
+
+// TODO LIST :)
+// - check for window resize
+// - sync threads
+// - add controls
+// - use boost for arb. precision
+
+struct renderConfig {
+    int windowWidth;
+    int windowHeight;
+
+    bool antiAliasing;
+    int maxIterations;
+
+    int totalThreads;
+};
+
+struct threadArgs {
+    int             threadNumber;
+    float           *pixelBuf;
+
+    renderConfig    *renderConfig;
+};
+
+// render function for threads
+void GLFWCALL render(void *arguments);
+
+// global (ew) variables for thread sync
+int         threadsDone = 0;
+GLFWmutex   mutex;
+GLFWcond    threadDone, nextFrame;
+
+int main(void)
+{
+    renderConfig *config = new renderConfig;
+
+    config->windowWidth      = 1280;
+    config->windowHeight     = 720;
+    config->antiAliasing     = true;
+    config->maxIterations    = 100;
+    config->totalThreads     = 7;
+    
+    // init GLFW
+    if (!glfwInit()) {
+        cout << "Failed to initialise glfw." << endl;
+        return 1;
+    }
+
+    // Open OpenGL window
+    if (!glfwOpenWindow(config->windowWidth, config->windowHeight, 0, 0, 0, 0, 0, 0, GLFW_WINDOW)) {
+        cout << "Failed to create OpenGL window." << endl;
+        glfwTerminate();
+        return 1;
+    }
+
+    // disable v-sync
+    glfwSwapInterval(0);
+
+    // array of pixel colours
+    int sizeOfPixels = config->windowWidth * config->windowHeight * 3;
+    float *pixelBuf  = new float[sizeOfPixels];
+
+    // create the render threads
+    GLFWthread *renderThreads  = new GLFWthread[config->totalThreads];
+    threadArgs *argsForThreads = new threadArgs[config->totalThreads];
+
+    for (int t = 0; t < config->totalThreads; ++t) {
+        // configure each thread
+        argsForThreads[t].threadNumber  = t;
+        argsForThreads[t].pixelBuf      = pixelBuf;
+        argsForThreads[t].renderConfig  = config;
+
+        renderThreads[t] = glfwCreateThread(render, &argsForThreads[t]);
+    }
+
+    // render loop
+    while(true) {
+        // clear buffer
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        // wait for threads to be done
+        glfwLockMutex(mutex);
+        bool renderingDone = false;
+        while(!renderingDone) {
+            renderingDone = (threadsDone == config->totalThreads);
+
+            if (!renderingDone)
+                glfwWaitCond(threadDone, mutex, GLFW_INFINITY);
+        }
+        glfwUnlockMutex(mutex);
+
+        // copy pixel buffer to frame buffer
+        glDrawPixels(config->windowWidth, config->windowHeight, GL_RGB, GL_FLOAT, pixelBuf);
+
+        // swap buffers
+        glfwSwapBuffers();
+
+        // signal threads to continue
+        glfwBroadcastCond(nextFrame);
+        
+        // exit if ESC key is pressed
+        if (glfwGetKey(GLFW_KEY_ESC) == GLFW_PRESS)
+            break;
+
+        // exit if window is closed
+        if (glfwGetWindowParam(GLFW_OPENED) == GL_FALSE)
+            break;
+    }
+
+    // close render threads
+    for (int t = 0; t < config->totalThreads; ++t)
+        glfwDestroyThread(renderThreads[t]);
+
+    // clean up
+    delete config;
+    delete [] pixelBuf;
+    delete [] renderThreads;
+    delete [] argsForThreads;
+
+    // clean up OpenGL
+    glfwTerminate();
+
+    // exit
+    return 0;
+}
+
+void GLFWCALL render(void *arguments) {
+
+    // get arguments
+    threadArgs *args = (threadArgs *)arguments;
+
+    int windowSize = args->renderConfig->windowWidth * args->renderConfig->windowHeight;
+
+    while(true) {
+        for (int i = 0; i < windowSize; ++i) {
+            // is this our job?
+            if (i % args->renderConfig->totalThreads == args->threadNumber) {
+                int pixelBufIndex = i*3;
+
+                // get x and y
+                int x = i % args->renderConfig->windowWidth;
+                int y = (i - x) / args->renderConfig->windowWidth;
+
+                // scale x and y to be from -2.5 to 1 and -1 to 1 respectively
+                float x0 = ((float)x / 365.0f) - 2.5f;
+                float y0 = ((float)y / 360.0f) - 1.0f;
+
+                // working vars
+                bool pixelInSet = false;
+                float re        = 0.0f;
+                float im        = 0.0f;
+                int iteration   = 0;
+
+                while (iteration < args->renderConfig->maxIterations) {
+                    float reSq = re*re;
+                    float imSq = im*im;
+
+                    if (reSq + imSq > 4) {
+                        pixelInSet = true;
+                        break;
+                    }
+
+                    float temp = reSq - imSq + x0;
+
+                    im = 2*re*im + y0;
+                    re = temp;
+
+                    ++iteration;
+                }
+
+                // set it to black if it's in the set
+                if (!pixelInSet)
+                    iteration = 0;
+
+                // amount of colour
+                float factor = (float)iteration/(float)args->renderConfig->maxIterations;
+
+                // save to buffer
+                args->pixelBuf[pixelBufIndex+0] = factor;
+                args->pixelBuf[pixelBufIndex+1] = factor;
+                args->pixelBuf[pixelBufIndex+2] = factor;
+            }
+        }
+        
+        // done!
+        glfwLockMutex(mutex);
+        ++threadsDone;
+        glfwUnlockMutex(mutex);
+
+        // signal that we're finished
+        glfwSignalCond(threadDone);
+
+        // wait for signal to continue
+        glfwWaitCond(nextFrame, mutex, GLFW_INFINITY);
+
+        // not done!
+        glfwLockMutex(mutex);
+        --threadsDone;
+        glfwUnlockMutex(mutex);
+    }
+}
