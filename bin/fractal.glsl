@@ -43,6 +43,6 @@ void main( void ) {
 	// set centre
 	pos	+= centre;
 	
-	gl_FragColor = vec4( fractal(pos)*vec3(0,1,0), 1.0 );
+	gl_FragColor = vec4( fractal(pos)*vec3(0,0.5,1), 1.0 );
 
 }
